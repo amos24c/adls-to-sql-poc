@@ -1,0 +1,32 @@
+## .NET build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+
+## Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+coverage*.json
+coverage*.xml
+
+## Unrelated projects that share this working folder. They carry their own Azure configuration and
+## ASP.NET Data Protection keys, and must never be published with this repo.
+AppRegTest/
+SharedKeys/
+
+## Local secrets and environment overrides.
+## The real connection string and Databricks token belong in user secrets or environment variables,
+## never in appsettings.json.
+appsettings.Development.json
+appsettings.Local.json
+*.env
+.env
+secrets.json

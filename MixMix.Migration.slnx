@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MixMix.MigrationWorker/MixMix.MigrationWorker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MixMix.MigrationWorker.Tests/MixMix.MigrationWorker.Tests.csproj" />
+  </Folder>
+</Solution>
