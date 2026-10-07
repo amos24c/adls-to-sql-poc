@@ -1,0 +1,216 @@
+Yes. For your Learner UI → APIM → multiple AKS microservices architecture, I’d implement correlation IDs at the first server-side entry point, then propagate them through every downstream HTTP call and message.
+A clean flow is:
+Browser
+   │
+   │ HTTP request
+   ▼
+Learner UI / BFF (.NET)
+   │
+   │ X-Correlation-ID: 9d36...
+   ▼
+APIM
+   │
+   ├────► Learner API
+   │         │
+   │         └────► Progress API
+   │
+   └────► Course API
+             │
+             └────► Content API
+
+Every service logs:
+CorrelationId = 9d36...
+
+1. Generate it in the Learner UI's .NET backend
+If your Learner UI is ASP.NET Core MVC/Blazor Server, middleware is a good place:
+public class CorrelationIdMiddleware
+{
+    private const string HeaderName = "X-Correlation-ID";
+    private readonly RequestDelegate _next;
+
+    public CorrelationIdMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(
+        HttpContext context,
+        ILogger<CorrelationIdMiddleware> logger)
+    {
+        var correlationId =
+            context.Request.Headers.TryGetValue(HeaderName, out var existing)
+                ? existing.ToString()
+                : Guid.NewGuid().ToString();
+
+        context.Items["CorrelationId"] = correlationId;
+
+        context.Response.Headers[HeaderName] = correlationId;
+
+        using (logger.BeginScope(new Dictionary<string, object>
+        {
+            ["CorrelationId"] = correlationId
+        }))
+        {
+            await _next(context);
+        }
+    }
+}
+
+Register it:
+app.UseMiddleware<CorrelationIdMiddleware>();
+
+2. Automatically propagate it to downstream microservices
+Don't manually add the header everywhere. Use a DelegatingHandler:
+public class CorrelationIdHandler : DelegatingHandler
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public CorrelationIdHandler(IHttpContextAccessor httpContextAccessor)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        var context = _httpContextAccessor.HttpContext;
+
+        if (context?.Items["CorrelationId"] is string correlationId)
+        {
+            request.Headers.TryAddWithoutValidation(
+                "X-Correlation-ID",
+                correlationId);
+        }
+
+        return await base.SendAsync(request, cancellationToken);
+    }
+}
+
+Then:
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddTransient<CorrelationIdHandler>();
+
+builder.Services
+    .AddHttpClient("LearnerApi")
+    .AddHttpMessageHandler<CorrelationIdHandler>();
+
+Now:
+var client = httpClientFactory.CreateClient("LearnerApi");
+
+await client.GetAsync("/api/courses");
+
+automatically becomes:
+GET /api/courses
+
+X-Correlation-ID: 9d36e45a-...
+
+3. Every microservice should accept and propagate it
+Use essentially the same middleware in each AKS service.
+The important rule is:
+If X-Correlation-ID exists
+    → keep it
+
+If it doesn't exist
+    → create it
+
+So if Learner API calls Progress API:
+Learner UI
+CorrelationId = ABC123
+       ↓
+APIM
+CorrelationId = ABC123
+       ↓
+Learner API
+CorrelationId = ABC123
+       ↓
+Progress API
+CorrelationId = ABC123
+       ↓
+SQL / logs
+CorrelationId = ABC123
+
+Don't generate a new ID at every microservice.
+4. Include it in structured logging
+Because you're using Datadog, this becomes particularly useful.
+Instead of:
+Getting learner courses
+Calling progress API
+Course retrieval completed
+
+you want structured properties:
+{
+  "service": "learner-api",
+  "correlationId": "ABC123",
+  "learnerId": "12345",
+  "message": "Getting learner courses"
+}
+
+and downstream:
+{
+  "service": "progress-api",
+  "correlationId": "ABC123",
+  "message": "Retrieving learner progress"
+}
+
+Then searching Datadog for:
+@correlationId:ABC123
+
+shows the entire transaction across services.
+5. APIM should preserve the header
+I'd explicitly ensure it exists in your APIM inbound policy too:
+<inbound>
+    <base />
+
+    <set-header name="X-Correlation-ID"
+                exists-action="skip">
+        <value>@(Guid.NewGuid().ToString())</value>
+    </set-header>
+
+</inbound>
+
+exists-action="skip" is important. If the Learner UI already supplied it, APIM doesn't replace it.
+One important improvement: use distributed tracing too
+I wouldn't make a custom correlation ID your only tracing mechanism.
+Since these are modern .NET microservices, use OpenTelemetry / Activity / W3C Trace Context as the actual distributed tracing mechanism:
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+
+ASP.NET Core and HttpClient already have strong support for this.
+Conceptually:
+                     TraceId
+          4bf92f3577b34da6a3ce929d0e0e4736
+                           │
+        ┌──────────────────┼──────────────────┐
+        ▼                  ▼                  ▼
+    Learner UI         Learner API        Course API
+      Span A              Span B             Span C
+                            │
+                            ▼
+                       Progress API
+                          Span D
+
+The TraceId stays the same, while each operation gets its own SpanId.
+For your LMS architecture, I'd therefore carry both:
+X-Correlation-ID: e7253292-41ce-4d8b-93f8-...
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-...
+
+Use X-Correlation-ID as the human/support-friendly request identifier, while OpenTelemetry provides the real distributed trace.
+For asynchronous operations through Azure Service Bus, also propagate the correlation/trace context in the message properties:
+Learner UI
+    ↓
+APIM
+    ↓
+Learner API ──────────────► Progress API
+    │
+    │ Service Bus message
+    ▼
+Service Bus
+    ↓
+Completion Processor
+    ↓
+Azure SQL / downstream service
+
+      SAME TRACE / CORRELATION CONTEXT
+
+That gives you end-to-end visibility even when the HTTP request ends before the background processing occurs.
+For the LMS stack you're building, I would standardize this as a shared NuGet library used by Learner, Trainer, Manager/Admin, and all backend APIs, rather than duplicating correlation middleware and handlers in every service.
