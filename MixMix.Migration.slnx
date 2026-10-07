@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="EventHubSasTest/EventHubSasTest.csproj" />
     <Project Path="src/MixMix.MigrationWorker/MixMix.MigrationWorker.csproj" />
   </Folder>
   <Folder Name="/tests/">
